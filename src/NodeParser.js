@@ -1,15 +1,17 @@
 /* @flow */
 'use strict';
-import type ImageLoader, {ImageElement} from './ImageLoader';
+import type ResourceLoader, {ImageElement} from './ResourceLoader';
 import type Logger from './Logger';
 import StackingContext from './StackingContext';
 import NodeContainer from './NodeContainer';
 import TextContainer from './TextContainer';
 import {inlineInputElement, inlineTextAreaElement, inlineSelectElement} from './Input';
+import {inlineListItemElement} from './ListItem';
+import {LIST_STYLE_TYPE} from './parsing/listStyle';
 
 export const NodeParser = (
     node: HTMLElement,
-    imageLoader: ImageLoader<ImageElement>,
+    resourceLoader: ResourceLoader,
     logger: Logger
 ): StackingContext => {
     if (__DEV__) {
@@ -18,10 +20,10 @@ export const NodeParser = (
 
     let index = 0;
 
-    const container = new NodeContainer(node, null, imageLoader, index++);
+    const container = new NodeContainer(node, null, resourceLoader, index++);
     const stack = new StackingContext(container, null, true);
 
-    parseNodeTree(node, container, stack, imageLoader, index);
+    parseNodeTree(node, container, stack, resourceLoader, index);
 
     if (__DEV__) {
         logger.log(`Finished parsing node tree`);
@@ -36,7 +38,7 @@ const parseNodeTree = (
     node: HTMLElement,
     parent: NodeContainer,
     stack: StackingContext,
-    imageLoader: ImageLoader<ImageElement>,
+    resourceLoader: ResourceLoader,
     index: number
 ): void => {
     if (__DEV__ && index > 50000) {
@@ -46,16 +48,21 @@ const parseNodeTree = (
     for (let childNode = node.firstChild, nextNode; childNode; childNode = nextNode) {
         nextNode = childNode.nextSibling;
         const defaultView = childNode.ownerDocument.defaultView;
-        if (childNode instanceof defaultView.Text || childNode instanceof Text) {
+        if (
+            childNode instanceof defaultView.Text ||
+            childNode instanceof Text ||
+            (defaultView.parent && childNode instanceof defaultView.parent.Text)
+        ) {
             if (childNode.data.trim().length > 0) {
                 parent.childNodes.push(TextContainer.fromTextNode(childNode, parent));
             }
         } else if (
             childNode instanceof defaultView.HTMLElement ||
-            childNode instanceof HTMLElement
+            childNode instanceof HTMLElement ||
+            (defaultView.parent && childNode instanceof defaultView.parent.HTMLElement)
         ) {
             if (IGNORED_NODE_NAMES.indexOf(childNode.nodeName) === -1) {
-                const container = new NodeContainer(childNode, parent, imageLoader, index++);
+                const container = new NodeContainer(childNode, parent, resourceLoader, index++);
                 if (container.isVisible()) {
                     if (childNode.tagName === 'INPUT') {
                         // $FlowFixMe
@@ -66,6 +73,11 @@ const parseNodeTree = (
                     } else if (childNode.tagName === 'SELECT') {
                         // $FlowFixMe
                         inlineSelectElement(childNode, container);
+                    } else if (
+                        container.style.listStyle &&
+                        container.style.listStyle.listStyleType !== LIST_STYLE_TYPE.NONE
+                    ) {
+                        inlineListItemElement(childNode, container, resourceLoader);
                     }
 
                     const SHOULD_TRAVERSE_CHILDREN = childNode.tagName !== 'TEXTAREA';
@@ -87,21 +99,22 @@ const parseNodeTree = (
                         );
                         parentStack.contexts.push(childStack);
                         if (SHOULD_TRAVERSE_CHILDREN) {
-                            parseNodeTree(childNode, container, childStack, imageLoader, index);
+                            parseNodeTree(childNode, container, childStack, resourceLoader, index);
                         }
                     } else {
                         stack.children.push(container);
                         if (SHOULD_TRAVERSE_CHILDREN) {
-                            parseNodeTree(childNode, container, stack, imageLoader, index);
+                            parseNodeTree(childNode, container, stack, resourceLoader, index);
                         }
                     }
                 }
             }
         } else if (
             childNode instanceof defaultView.SVGSVGElement ||
-            childNode instanceof SVGSVGElement
+            childNode instanceof SVGSVGElement ||
+            (defaultView.parent && childNode instanceof defaultView.parent.SVGSVGElement)
         ) {
-            const container = new NodeContainer(childNode, parent, imageLoader, index++);
+            const container = new NodeContainer(childNode, parent, resourceLoader, index++);
             const treatAsRealStackingContext = createsRealStackingContext(container, childNode);
             if (treatAsRealStackingContext || createsStackingContext(container)) {
                 // for treatAsRealStackingContext:false, any positioned descendants and descendants

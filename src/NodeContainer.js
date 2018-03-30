@@ -7,7 +7,11 @@ import type {BorderRadius} from './parsing/borderRadius';
 import type {DisplayBit} from './parsing/display';
 import type {Float} from './parsing/float';
 import type {Font} from './parsing/font';
+import type {LineBreak} from './parsing/lineBreak';
+import type {ListStyle} from './parsing/listStyle';
+import type {Margin} from './parsing/margin';
 import type {Overflow} from './parsing/overflow';
+import type {OverflowWrap} from './parsing/overflowWrap';
 import type {Padding} from './parsing/padding';
 import type {Position} from './parsing/position';
 import type {TextShadow} from './parsing/textShadow';
@@ -15,10 +19,11 @@ import type {TextTransform} from './parsing/textTransform';
 import type {TextDecoration} from './parsing/textDecoration';
 import type {Transform} from './parsing/transform';
 import type {Visibility} from './parsing/visibility';
+import type {WordBreak} from './parsing/word-break';
 import type {zIndex} from './parsing/zIndex';
 
 import type {Bounds, BoundCurves} from './Bounds';
-import type ImageLoader, {ImageElement} from './ImageLoader';
+import type ResourceLoader, {ImageElement} from './ResourceLoader';
 import type {Path} from './drawing/Path';
 import type TextContainer from './TextContainer';
 
@@ -32,7 +37,11 @@ import {parseDisplay, DISPLAY} from './parsing/display';
 import {parseCSSFloat, FLOAT} from './parsing/float';
 import {parseFont} from './parsing/font';
 import {parseLetterSpacing} from './parsing/letterSpacing';
+import {parseLineBreak} from './parsing/lineBreak';
+import {parseListStyle} from './parsing/listStyle';
+import {parseMargin} from './parsing/margin';
 import {parseOverflow, OVERFLOW} from './parsing/overflow';
+import {parseOverflowWrap} from './parsing/overflowWrap';
 import {parsePadding} from './parsing/padding';
 import {parsePosition, POSITION} from './parsing/position';
 import {parseTextDecoration} from './parsing/textDecoration';
@@ -40,6 +49,7 @@ import {parseTextShadow} from './parsing/textShadow';
 import {parseTextTransform} from './parsing/textTransform';
 import {parseTransform} from './parsing/transform';
 import {parseVisibility, VISIBILITY} from './parsing/visibility';
+import {parseWordBreak} from './parsing/word-break';
 import {parseZIndex} from './parsing/zIndex';
 
 import {parseBounds, parseBoundCurves, calculatePaddingBoxPath} from './Bounds';
@@ -50,6 +60,7 @@ import {
     getInputBorderRadius,
     reformatInputBounds
 } from './Input';
+import {getListOwner} from './ListItem';
 
 type StyleDeclaration = {
     background: Background,
@@ -60,8 +71,12 @@ type StyleDeclaration = {
     float: Float,
     font: Font,
     letterSpacing: number,
+    lineBreak: LineBreak,
+    listStyle: ListStyle | null,
+    margin: Margin,
     opacity: number,
     overflow: Overflow,
+    overflowWrap: OverflowWrap,
     padding: Padding,
     position: Position,
     textDecoration: TextDecoration | null,
@@ -69,6 +84,7 @@ type StyleDeclaration = {
     textTransform: TextTransform,
     transform: Transform,
     visibility: Visibility,
+    wordBreak: WordBreak,
     zIndex: zIndex
 };
 
@@ -79,21 +95,32 @@ export default class NodeContainer {
     parent: ?NodeContainer;
     style: StyleDeclaration;
     childNodes: Array<TextContainer | Path>;
+    listItems: Array<NodeContainer>;
+    listIndex: ?number;
+    listStart: ?number;
     bounds: Bounds;
     curvedBounds: BoundCurves;
     image: ?string;
     index: number;
+    tagName: string;
 
     constructor(
         node: HTMLElement | SVGSVGElement,
         parent: ?NodeContainer,
-        imageLoader: ImageLoader<ImageElement>,
+        resourceLoader: ResourceLoader,
         index: number
     ) {
         this.parent = parent;
+        this.tagName = node.tagName;
         this.index = index;
         this.childNodes = [];
+        this.listItems = [];
+        if (typeof node.start === 'number') {
+            this.listStart = node.start;
+        }
         const defaultView = node.ownerDocument.defaultView;
+        const scrollX = defaultView.pageXOffset;
+        const scrollY = defaultView.pageYOffset;
         const style = defaultView.getComputedStyle(node, null);
         const display = parseDisplay(style.display);
 
@@ -102,7 +129,7 @@ export default class NodeContainer {
         const position = parsePosition(style.position);
 
         this.style = {
-            background: IS_INPUT ? INPUT_BACKGROUND : parseBackground(style, imageLoader),
+            background: IS_INPUT ? INPUT_BACKGROUND : parseBackground(style, resourceLoader),
             border: IS_INPUT ? INPUT_BORDERS : parseBorder(style),
             borderRadius:
                 (node instanceof defaultView.HTMLInputElement ||
@@ -115,11 +142,17 @@ export default class NodeContainer {
             float: parseCSSFloat(style.float),
             font: parseFont(style),
             letterSpacing: parseLetterSpacing(style.letterSpacing),
+            listStyle: display === DISPLAY.LIST_ITEM ? parseListStyle(style) : null,
+            lineBreak: parseLineBreak(style.lineBreak),
+            margin: parseMargin(style),
             opacity: parseFloat(style.opacity),
             overflow:
                 INPUT_TAGS.indexOf(node.tagName) === -1
                     ? parseOverflow(style.overflow)
                     : OVERFLOW.HIDDEN,
+            overflowWrap: parseOverflowWrap(
+                style.overflowWrap ? style.overflowWrap : style.wordWrap
+            ),
             padding: parsePadding(style),
             position: position,
             textDecoration: parseTextDecoration(style),
@@ -127,6 +160,7 @@ export default class NodeContainer {
             textTransform: parseTextTransform(style.textTransform),
             transform: parseTransform(style),
             visibility: parseVisibility(style.visibility),
+            wordBreak: parseWordBreak(style.wordBreak),
             zIndex: parseZIndex(position !== POSITION.STATIC ? style.zIndex : 'auto')
         };
 
@@ -135,10 +169,24 @@ export default class NodeContainer {
             node.style.transform = 'matrix(1,0,0,1,0,0)';
         }
 
+        if (display === DISPLAY.LIST_ITEM) {
+            const listOwner = getListOwner(this);
+            if (listOwner) {
+                const listIndex = listOwner.listItems.length;
+                listOwner.listItems.push(this);
+                this.listIndex =
+                    node.hasAttribute('value') && typeof node.value === 'number'
+                        ? node.value
+                        : listIndex === 0
+                          ? typeof listOwner.listStart === 'number' ? listOwner.listStart : 1
+                          : listOwner.listItems[listIndex - 1].listIndex + 1;
+            }
+        }
+
         // TODO move bound retrieval for all nodes to a later stage?
         if (node.tagName === 'IMG') {
             node.addEventListener('load', () => {
-                this.bounds = parseBounds(node);
+                this.bounds = parseBounds(node, scrollX, scrollY);
                 this.curvedBounds = parseBoundCurves(
                     this.bounds,
                     this.style.border,
@@ -146,8 +194,10 @@ export default class NodeContainer {
                 );
             });
         }
-        this.image = getImage(node, imageLoader);
-        this.bounds = IS_INPUT ? reformatInputBounds(parseBounds(node)) : parseBounds(node);
+        this.image = getImage(node, resourceLoader);
+        this.bounds = IS_INPUT
+            ? reformatInputBounds(parseBounds(node, scrollX, scrollY))
+            : parseBounds(node, scrollX, scrollY);
         this.curvedBounds = parseBoundCurves(
             this.bounds,
             this.style.border,
@@ -166,8 +216,7 @@ export default class NodeContainer {
     }
     getClipPaths(): Array<Path> {
         const parentClips = this.parent ? this.parent.getClipPaths() : [];
-        const isClipped =
-            this.style.overflow === OVERFLOW.HIDDEN || this.style.overflow === OVERFLOW.SCROLL;
+        const isClipped = this.style.overflow !== OVERFLOW.VISIBLE;
 
         return isClipped
             ? parentClips.concat([calculatePaddingBoxPath(this.curvedBounds)])
@@ -219,26 +268,31 @@ export default class NodeContainer {
     }
 }
 
-const getImage = (
-    node: HTMLElement | SVGSVGElement,
-    imageLoader: ImageLoader<ImageElement>
-): ?string => {
+const getImage = (node: HTMLElement | SVGSVGElement, resourceLoader: ResourceLoader): ?string => {
     if (
         node instanceof node.ownerDocument.defaultView.SVGSVGElement ||
         node instanceof SVGSVGElement
     ) {
         const s = new XMLSerializer();
-        return imageLoader.loadImage(
+        return resourceLoader.loadImage(
             `data:image/svg+xml,${encodeURIComponent(s.serializeToString(node))}`
         );
     }
     switch (node.tagName) {
         case 'IMG':
             // $FlowFixMe
-            return imageLoader.loadImage(node.currentSrc || node.src);
+            const img: HTMLImageElement = node;
+            return resourceLoader.loadImage(img.currentSrc || img.src);
         case 'CANVAS':
             // $FlowFixMe
-            return imageLoader.loadCanvas(node);
+            const canvas: HTMLCanvasElement = node;
+            return resourceLoader.loadCanvas(canvas);
+        case 'IFRAME':
+            const iframeKey = node.getAttribute('data-html2canvas-internal-iframe-key');
+            if (iframeKey) {
+                return iframeKey;
+            }
+            break;
     }
 
     return null;

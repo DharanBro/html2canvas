@@ -1,14 +1,22 @@
 /* @flow */
 'use strict';
 import type {Path} from '../drawing/Path';
-import type {Bounds, BoundCurves} from '../Bounds';
-import type ImageLoader, {ImageElement} from '../ImageLoader';
+import type {BoundCurves} from '../Bounds';
+import type ResourceLoader, {ImageElement} from '../ResourceLoader';
+import type {Border} from './border';
+import type {Padding} from './padding';
 
 import Color from '../Color';
 import Length from '../Length';
 import Size from '../drawing/Size';
 import Vector from '../drawing/Vector';
-import {calculateBorderBoxPath, calculatePaddingBoxPath} from '../Bounds';
+import {
+    calculateBorderBoxPath,
+    calculatePaddingBoxPath,
+    calculatePaddingBox,
+    Bounds
+} from '../Bounds';
+import {PADDING_SIDES} from './padding';
 
 export type Background = {
     backgroundImage: Array<BackgroundImage>,
@@ -115,19 +123,59 @@ export const calculateBackgroundSize = (
     return new Size(width, height);
 };
 
+export const calculateGradientBackgroundSize = (
+    backgroundImage: BackgroundImage,
+    bounds: Bounds
+): Size => {
+    const size = backgroundImage.size;
+    const width = size[0].value ? size[0].value.getAbsoluteValue(bounds.width) : bounds.width;
+    const height = size[1].value
+        ? size[1].value.getAbsoluteValue(bounds.height)
+        : size[0].value ? width : bounds.height;
+
+    return new Size(width, height);
+};
+
 const AUTO_SIZE = new BackgroundSize(AUTO);
 
 export const calculateBackgroungPaintingArea = (
     curves: BoundCurves,
     clip: BackgroundClip
 ): Path => {
-    // TODO support CONTENT_BOX
     switch (clip) {
         case BACKGROUND_CLIP.BORDER_BOX:
             return calculateBorderBoxPath(curves);
         case BACKGROUND_CLIP.PADDING_BOX:
         default:
             return calculatePaddingBoxPath(curves);
+    }
+};
+
+export const calculateBackgroungPositioningArea = (
+    backgroundOrigin: BackgroundOrigin,
+    bounds: Bounds,
+    padding: Padding,
+    border: Array<Border>
+): Bounds => {
+    const paddingBox = calculatePaddingBox(bounds, border);
+
+    switch (backgroundOrigin) {
+        case BACKGROUND_ORIGIN.BORDER_BOX:
+            return bounds;
+        case BACKGROUND_ORIGIN.CONTENT_BOX:
+            const paddingLeft = padding[PADDING_SIDES.LEFT].getAbsoluteValue(bounds.width);
+            const paddingRight = padding[PADDING_SIDES.RIGHT].getAbsoluteValue(bounds.width);
+            const paddingTop = padding[PADDING_SIDES.TOP].getAbsoluteValue(bounds.width);
+            const paddingBottom = padding[PADDING_SIDES.BOTTOM].getAbsoluteValue(bounds.width);
+            return new Bounds(
+                paddingBox.left + paddingLeft,
+                paddingBox.top + paddingTop,
+                paddingBox.width - paddingLeft - paddingRight,
+                paddingBox.height - paddingTop - paddingBottom
+            );
+        case BACKGROUND_ORIGIN.PADDING_BOX:
+        default:
+            return paddingBox;
     }
 };
 
@@ -223,11 +271,11 @@ export const calculateBackgroundRepeatPath = (
 
 export const parseBackground = (
     style: CSSStyleDeclaration,
-    imageLoader: ImageLoader<ImageElement>
+    resourceLoader: ResourceLoader
 ): Background => {
     return {
         backgroundColor: new Color(style.backgroundColor),
-        backgroundImage: parseBackgroundImages(style, imageLoader),
+        backgroundImage: parseBackgroundImages(style, resourceLoader),
         backgroundClip: parseBackgroundClip(style.backgroundClip),
         backgroundOrigin: parseBackgroundOrigin(style.backgroundOrigin)
     };
@@ -276,13 +324,13 @@ const parseBackgroundRepeat = (backgroundRepeat: string): BackgroundRepeat => {
 
 const parseBackgroundImages = (
     style: CSSStyleDeclaration,
-    imageLoader: ImageLoader<ImageElement>
+    resourceLoader: ResourceLoader
 ): Array<BackgroundImage> => {
     const sources: Array<BackgroundSource> = parseBackgroundImage(
         style.backgroundImage
     ).map(backgroundImage => {
         if (backgroundImage.method === 'url') {
-            const key = imageLoader.loadImage(backgroundImage.args[0]);
+            const key = resourceLoader.loadImage(backgroundImage.args[0]);
             backgroundImage.args = key ? [key] : [];
         }
         return backgroundImage;

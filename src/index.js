@@ -3,173 +3,85 @@
 
 import type {RenderTarget} from './Renderer';
 
-import {NodeParser} from './NodeParser';
-import Renderer from './Renderer';
-import ForeignObjectRenderer from './renderer/ForeignObjectRenderer';
 import CanvasRenderer from './renderer/CanvasRenderer';
 import Logger from './Logger';
-import ImageLoader from './ImageLoader';
-import Feature from './Feature';
-import {Bounds, parseDocumentSize} from './Bounds';
-import {cloneWindow, DocumentCloner} from './Clone';
-import {FontMetrics} from './Font';
-import Color, {TRANSPARENT} from './Color';
+import {renderElement} from './Window';
+import {parseBounds, parseDocumentSize} from './Bounds';
 
 export type Options = {
     async: ?boolean,
     allowTaint: ?boolean,
     backgroundColor: string,
     canvas: ?HTMLCanvasElement,
+    foreignObjectRendering: boolean,
+    ignoreElements?: HTMLElement => boolean,
     imageTimeout: number,
+    logging: boolean,
+    onclone?: Document => void,
     proxy: ?string,
     removeContainer: ?boolean,
     scale: number,
     target: RenderTarget<*>,
-    type: ?string,
+    useCORS: boolean,
+    width: number,
+    height: number,
+    x: number,
+    y: number,
+    scrollX: number,
+    scrollY: number,
     windowWidth: number,
-    windowHeight: number,
-    offsetX: number,
-    offsetY: number
+    windowHeight: number
 };
 
 const html2canvas = (element: HTMLElement, conf: ?Options): Promise<*> => {
-    if (typeof console === 'object' && typeof console.log === 'function') {
-        console.log(`html2canvas ${__VERSION__}`);
+    const config = conf || {};
+    const logger = new Logger(typeof config.logging === 'boolean' ? config.logging : true);
+    logger.log(`html2canvas ${__VERSION__}`);
+
+    if (__DEV__ && typeof config.onrendered === 'function') {
+        logger.error(
+            `onrendered option is deprecated, html2canvas returns a Promise with the canvas as the value`
+        );
     }
 
-    const config = conf || {};
-    const logger = new Logger();
-
     const ownerDocument = element.ownerDocument;
+    if (!ownerDocument) {
+        return Promise.reject(`Provided element is not within a Document`);
+    }
     const defaultView = ownerDocument.defaultView;
+
+    const scrollX = defaultView.pageXOffset;
+    const scrollY = defaultView.pageYOffset;
+
+    const isDocument = element.tagName === 'HTML' || element.tagName === 'BODY';
+
+    const {width, height, left, top} = isDocument
+        ? parseDocumentSize(ownerDocument)
+        : parseBounds(element, scrollX, scrollY);
 
     const defaultOptions = {
         async: true,
         allowTaint: false,
+        backgroundColor: '#ffffff',
         imageTimeout: 15000,
+        logging: true,
         proxy: null,
         removeContainer: true,
+        foreignObjectRendering: false,
         scale: defaultView.devicePixelRatio || 1,
         target: new CanvasRenderer(config.canvas),
-        type: null,
+        useCORS: false,
+        x: left,
+        y: top,
+        width: Math.ceil(width),
+        height: Math.ceil(height),
         windowWidth: defaultView.innerWidth,
         windowHeight: defaultView.innerHeight,
-        offsetX: defaultView.pageXOffset,
-        offsetY: defaultView.pageYOffset
+        scrollX: defaultView.pageXOffset,
+        scrollY: defaultView.pageYOffset
     };
 
-    const options = {...defaultOptions, ...config};
-
-    const windowBounds = new Bounds(
-        options.offsetX,
-        options.offsetY,
-        options.windowWidth,
-        options.windowHeight
-    );
-
-    const bounds = options.type === 'view' ? windowBounds : parseDocumentSize(ownerDocument);
-
-    // http://www.w3.org/TR/css3-background/#special-backgrounds
-    const documentBackgroundColor = ownerDocument.documentElement
-        ? new Color(getComputedStyle(ownerDocument.documentElement).backgroundColor)
-        : TRANSPARENT;
-    const bodyBackgroundColor = ownerDocument.body
-        ? new Color(getComputedStyle(ownerDocument.body).backgroundColor)
-        : TRANSPARENT;
-
-    const backgroundColor =
-        element === ownerDocument.documentElement
-            ? documentBackgroundColor.isTransparent()
-              ? bodyBackgroundColor.isTransparent()
-                ? options.backgroundColor ? new Color(options.backgroundColor) : null
-                : bodyBackgroundColor
-              : documentBackgroundColor
-            : options.backgroundColor ? new Color(options.backgroundColor) : null;
-
-    // $FlowFixMe
-    const result = Feature.SUPPORT_FOREIGNOBJECT_DRAWING.then(
-        supportForeignObject =>
-            supportForeignObject
-                ? (cloner => {
-                      if (__DEV__) {
-                          logger.log(`Document cloned, using foreignObject rendering`);
-                      }
-
-                      return cloner.imageLoader.ready().then(() => {
-                          const renderer = new ForeignObjectRenderer(cloner.clonedReferenceElement);
-                          return renderer.render({
-                              bounds,
-                              backgroundColor,
-                              logger,
-                              scale: options.scale
-                          });
-                      });
-                  })(new DocumentCloner(element, options, logger, true))
-                : cloneWindow(
-                      ownerDocument,
-                      windowBounds,
-                      element,
-                      options,
-                      logger
-                  ).then(([container, clonedElement]) => {
-                      if (__DEV__) {
-                          logger.log(`Document cloned, using computed rendering`);
-                      }
-
-                      const imageLoader = new ImageLoader(
-                          options,
-                          logger,
-                          clonedElement.ownerDocument.defaultView
-                      );
-                      const stack = NodeParser(clonedElement, imageLoader, logger);
-                      const clonedDocument = clonedElement.ownerDocument;
-                      const width = bounds.width;
-                      const height = bounds.height;
-
-                      if (backgroundColor === stack.container.style.background.backgroundColor) {
-                          stack.container.style.background.backgroundColor = TRANSPARENT;
-                      }
-
-                      return imageLoader.ready().then(imageStore => {
-                          if (options.removeContainer === true) {
-                              if (container.parentNode) {
-                                  container.parentNode.removeChild(container);
-                              } else if (__DEV__) {
-                                  logger.log(
-                                      `Cannot detach cloned iframe as it is not in the DOM anymore`
-                                  );
-                              }
-                          }
-
-                          const fontMetrics = new FontMetrics(clonedDocument);
-                          if (__DEV__) {
-                              logger.log(`Starting renderer`);
-                          }
-
-                          const renderOptions = {
-                              backgroundColor,
-                              fontMetrics,
-                              imageStore,
-                              logger,
-                              scale: options.scale,
-                              width,
-                              height
-                          };
-
-                          if (Array.isArray(options.target)) {
-                              return Promise.all(
-                                  options.target.map(target => {
-                                      const renderer = new Renderer(target, renderOptions);
-                                      return renderer.render(stack);
-                                  })
-                              );
-                          } else {
-                              const renderer = new Renderer(options.target, renderOptions);
-                              return renderer.render(stack);
-                          }
-                      });
-                  })
-    );
+    const result = renderElement(element, {...defaultOptions, ...config}, logger);
 
     if (__DEV__) {
         return result.catch(e => {

@@ -14,38 +14,35 @@ import type {TextShadow} from './parsing/textShadow';
 import type {Matrix} from './parsing/transform';
 
 import type {BoundCurves} from './Bounds';
-import type {Gradient} from './Gradient';
-import type {ImageStore, ImageElement} from './ImageLoader';
+import type {LinearGradient, RadialGradient} from './Gradient';
+import type {ResourceStore, ImageElement} from './ResourceLoader';
 import type NodeContainer from './NodeContainer';
 import type StackingContext from './StackingContext';
 import type {TextBounds} from './TextBounds';
 
-import {
-    Bounds,
-    parsePathForBorder,
-    calculateContentBox,
-    calculatePaddingBox,
-    calculatePaddingBoxPath
-} from './Bounds';
+import {Bounds, parsePathForBorder, calculateContentBox, calculatePaddingBoxPath} from './Bounds';
 import {FontMetrics} from './Font';
-import {parseGradient} from './Gradient';
+import {parseGradient, GRADIENT_TYPE} from './Gradient';
 import TextContainer from './TextContainer';
 
 import {
-    BACKGROUND_ORIGIN,
+    calculateBackgroungPositioningArea,
     calculateBackgroungPaintingArea,
     calculateBackgroundPosition,
     calculateBackgroundRepeatPath,
-    calculateBackgroundSize
+    calculateBackgroundSize,
+    calculateGradientBackgroundSize
 } from './parsing/background';
 import {BORDER_STYLE} from './parsing/border';
 
 export type RenderOptions = {
     scale: number,
     backgroundColor: ?Color,
-    imageStore: ImageStore<ImageElement>,
+    imageStore: ResourceStore,
     fontMetrics: FontMetrics,
     logger: Logger,
+    x: number,
+    y: number,
     width: number,
     height: number
 };
@@ -65,7 +62,9 @@ export interface RenderTarget<Output> {
 
     render(options: RenderOptions): void,
 
-    renderLinearGradient(bounds: Bounds, gradient: Gradient): void,
+    renderLinearGradient(bounds: Bounds, gradient: LinearGradient): void,
+
+    renderRadialGradient(bounds: Bounds, gradient: RadialGradient): void,
 
     renderRepeat(
         path: Path,
@@ -166,7 +165,7 @@ export default class Renderer {
             !container.style.background.backgroundColor.isTransparent() ||
             container.style.background.backgroundImage.length;
 
-        const renderableBorders = container.style.border.filter(
+        const hasRenderableBorders = container.style.border.some(
             border =>
                 border.borderStyle !== BORDER_STYLE.NONE && !border.borderColor.isTransparent()
         );
@@ -187,12 +186,17 @@ export default class Renderer {
                 });
             }
 
-            renderableBorders.forEach((border, side) => {
-                this.renderBorder(border, side, container.curvedBounds);
+            container.style.border.forEach((border, side) => {
+                if (
+                    border.borderStyle !== BORDER_STYLE.NONE &&
+                    !border.borderColor.isTransparent()
+                ) {
+                    this.renderBorder(border, side, container.curvedBounds);
+                }
             });
         };
 
-        if (HAS_BACKGROUND || renderableBorders.length) {
+        if (HAS_BACKGROUND || hasRenderableBorders) {
             const paths = container.parent ? container.parent.getClipPaths() : [];
             if (paths.length) {
                 this.target.clip(paths, callback);
@@ -206,12 +210,8 @@ export default class Renderer {
         container.style.background.backgroundImage.slice(0).reverse().forEach(backgroundImage => {
             if (backgroundImage.source.method === 'url' && backgroundImage.source.args.length) {
                 this.renderBackgroundRepeat(container, backgroundImage);
-            } else {
-                const gradient = parseGradient(backgroundImage.source, container.bounds);
-                if (gradient) {
-                    const bounds = container.bounds;
-                    this.target.renderLinearGradient(bounds, gradient);
-                }
+            } else if (/gradient/i.test(backgroundImage.source.method)) {
+                this.renderBackgroundGradient(container, backgroundImage);
             }
         });
     }
@@ -219,16 +219,17 @@ export default class Renderer {
     renderBackgroundRepeat(container: NodeContainer, background: BackgroundImage) {
         const image = this.options.imageStore.get(background.source.args[0]);
         if (image) {
-            const bounds = container.bounds;
-            const paddingBox = calculatePaddingBox(bounds, container.style.border);
-            const backgroundImageSize = calculateBackgroundSize(background, image, bounds);
-
-            // TODO support CONTENT_BOX
-            const backgroundPositioningArea =
-                container.style.background.backgroundOrigin === BACKGROUND_ORIGIN.BORDER_BOX
-                    ? bounds
-                    : paddingBox;
-
+            const backgroundPositioningArea = calculateBackgroungPositioningArea(
+                container.style.background.backgroundOrigin,
+                container.bounds,
+                container.style.padding,
+                container.style.border
+            );
+            const backgroundImageSize = calculateBackgroundSize(
+                background,
+                image,
+                backgroundPositioningArea
+            );
             const position = calculateBackgroundPosition(
                 background.position,
                 backgroundImageSize,
@@ -239,12 +240,50 @@ export default class Renderer {
                 position,
                 backgroundImageSize,
                 backgroundPositioningArea,
-                bounds
+                container.bounds
             );
 
-            const offsetX = Math.round(paddingBox.left + position.x);
-            const offsetY = Math.round(paddingBox.top + position.y);
+            const offsetX = Math.round(backgroundPositioningArea.left + position.x);
+            const offsetY = Math.round(backgroundPositioningArea.top + position.y);
             this.target.renderRepeat(path, image, backgroundImageSize, offsetX, offsetY);
+        }
+    }
+
+    renderBackgroundGradient(container: NodeContainer, background: BackgroundImage) {
+        const backgroundPositioningArea = calculateBackgroungPositioningArea(
+            container.style.background.backgroundOrigin,
+            container.bounds,
+            container.style.padding,
+            container.style.border
+        );
+        const backgroundImageSize = calculateGradientBackgroundSize(
+            background,
+            backgroundPositioningArea
+        );
+        const position = calculateBackgroundPosition(
+            background.position,
+            backgroundImageSize,
+            backgroundPositioningArea
+        );
+        const gradientBounds = new Bounds(
+            Math.round(backgroundPositioningArea.left + position.x),
+            Math.round(backgroundPositioningArea.top + position.y),
+            backgroundImageSize.width,
+            backgroundImageSize.height
+        );
+
+        const gradient = parseGradient(container, background.source, gradientBounds);
+        if (gradient) {
+            switch (gradient.type) {
+                case GRADIENT_TYPE.LINEAR_GRADIENT:
+                    // $FlowFixMe
+                    this.target.renderLinearGradient(gradientBounds, gradient);
+                    break;
+                case GRADIENT_TYPE.RADIAL_GRADIENT:
+                    // $FlowFixMe
+                    this.target.renderRadialGradient(gradientBounds, gradient);
+                    break;
+            }
         }
     }
 
@@ -319,8 +358,8 @@ export default class Renderer {
     render(stack: StackingContext): Promise<*> {
         if (this.options.backgroundColor) {
             this.target.rectangle(
-                0,
-                0,
+                this.options.x,
+                this.options.y,
                 this.options.width,
                 this.options.height,
                 this.options.backgroundColor

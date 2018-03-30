@@ -1,7 +1,7 @@
 const webpack = require('webpack');
 const fs = require('fs');
 const path = require('path');
-
+const UglifyJSPlugin = require('uglifyjs-webpack-plugin');
 const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'package.json')));
 
 const banner =
@@ -35,6 +35,23 @@ module.exports = [
         },
         module: modules,
         plugins
+    },
+    {
+        entry: './src/index.js',
+        output: {
+            filename: './dist/html2canvas.min.js',
+            library: 'html2canvas',
+            libraryTarget: 'umd'
+        },
+        module: modules,
+        plugins: [
+            new webpack.DefinePlugin({
+                '__DEV__': false,
+                '__VERSION__': JSON.stringify(pkg.version)
+            }),
+            new UglifyJSPlugin(),
+            new webpack.BannerPlugin(banner)
+        ]
     },
     {
         entry: './src/renderer/RefTestRenderer.js',
